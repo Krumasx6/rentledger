@@ -1,0 +1,46 @@
+# Exclude local/generated/private files. Application assets remain included.
+node_modules/
+.expo/
+dist/
+web-build/
+.git/
+.claude/
+.codex/
+.agents/
+.aws/
+expo-env.d.ts
+.kotlin/
+/ios
+/android
+
+# Signing material is supplied separately by EAS when required.
+credentials.json
+.signing/
+*.jks
+*.keystore
+*.p8
+*.p12
+*.key
+*.pem
+*.mobileprovision
+
+# Local data, build artifacts, environment files and logs.
+artifacts/
+*.apk
+*.aab
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+*.backup.json
+.env
+.env.*
+npm-debug.*
+yarn-debug.*
+yarn-error.*
+*.tsbuildinfo
+*.orig.*
+.DS_Store
+
+# Do not use a root /* allowlist here: it omitted required assets in Prebuild.

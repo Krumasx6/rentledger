@@ -1,28 +1,44 @@
 {
   "expo": {
-    "name": "rentledger",
+    "name": "RentLedger",
     "slug": "rentledger",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": true,
+      "infoPlist": {
+        "NSBluetoothAlwaysUsageDescription": "RentLedger uses Bluetooth to connect to your receipt printer and send rental payment receipts."
+      }
     },
     "android": {
+      "package": "com.krumasx6.rentledger",
+      "versionCode": 1,
       "adaptiveIcon": {
-        "backgroundColor": "#E6F4FE",
+        "backgroundColor": "#F8F8F3",
         "foregroundImage": "./assets/android-icon-foreground.png",
         "backgroundImage": "./assets/android-icon-background.png",
         "monochromeImage": "./assets/android-icon-monochrome.png"
       },
-      "predictiveBackGestureEnabled": false
+      "predictiveBackGestureEnabled": false,
+      "permissions": ["android.permission.BLUETOOTH_CONNECT"],
+      "softwareKeyboardLayoutMode": "resize"
     },
     "web": {
       "favicon": "./assets/favicon.png"
     },
-    "plugins": [
-      "expo-sqlite"
-    ]
+    "plugins": ["expo-router", "expo-sqlite", "expo-font"],
+    "scheme": "rentledger",
+    "extra": {
+      "router": {
+        "asyncRoutes": {
+          "web": true
+        }
+      },
+      "eas": {
+        "projectId": "bcd5d653-3bf0-44e2-beb1-2da7e0cff592"
+      }
+    }
   }
 }
