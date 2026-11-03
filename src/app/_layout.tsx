@@ -48,6 +48,7 @@ export default function Root() {
                 <Stack.Screen name="(tabs)" />
                 <Stack.Screen name="tenant" />
                 <Stack.Screen name="payment" />
+                <Stack.Screen name="payment-status" />
                 <Stack.Screen name="about" />
                 <Stack.Screen name="printer" />
                 <Stack.Screen name="bluetooth-printer" />

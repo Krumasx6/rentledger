@@ -26,7 +26,14 @@ import {
 import { screenMetrics } from "../core/layout";
 import { entries } from "../database/repository";
 import { useLoad, useMonth } from "../hooks/useLedger";
-export default function Monthly({ records = false }: { records?: boolean }) {
+type PaymentFilter = "paid" | "outstanding";
+export default function Monthly({
+  records = false,
+  paymentFilter,
+}: {
+  records?: boolean;
+  paymentFilter?: PaymentFilter;
+}) {
   const db = useSQLiteContext();
   const { width } = useWindowDimensions();
   const insets = useSafeAreaInsets();
@@ -37,11 +44,30 @@ export default function Monthly({ records = false }: { records?: boolean }) {
     useCallback(() => entries(db, month), [db, month]),
   );
   const total = totals(data || []);
-  const filtered = data?.filter((e) =>
+  const matchingStatus = data?.filter((e) =>
+    paymentFilter === "paid"
+      ? status(e.amount, e.paid) === "PAID"
+      : paymentFilter === "outstanding"
+        ? status(e.amount, e.paid) !== "PAID"
+        : true,
+  );
+  const filtered = matchingStatus?.filter((e) =>
     `${e.name} ${e.room}`.toLowerCase().includes(search.toLowerCase()),
   );
   return (
-    <Page tabbed title={records ? "Records" : "RentLedger"}>
+    <Page
+      tabbed={!paymentFilter}
+      back={!!paymentFilter}
+      title={
+        paymentFilter === "paid"
+          ? "Fully Paid"
+          : paymentFilter === "outstanding"
+            ? "Unpaid / Partial"
+            : records
+              ? "Records"
+              : "RentLedger"
+      }
+    >
       <MonthPicker month={month} onChange={setMonth} />
       {month !== currentMonth() && (
         <Button
@@ -59,94 +85,132 @@ export default function Monthly({ records = false }: { records?: boolean }) {
         <Loading />
       ) : (
         <>
-          <View
-            style={[
-              s.card,
-              {
-                backgroundColor: colors.ink,
-                borderColor: colors.ink,
-                padding: 20,
-              },
-            ]}
-          >
-            <Text style={{ color: "#BCD4C7", fontSize: 13, fontWeight: "600" }}>
-              Collected
-            </Text>
-            <Text
-              adjustsFontSizeToFit
-              numberOfLines={1}
-              style={{
-                color: "#FFF",
-                fontSize: 34,
-                fontWeight: "800",
-                letterSpacing: -1,
-              }}
-            >
-              {money(total.collected)}
-            </Text>
-            <View style={s.between}>
-              <Text style={{ color: "#BCD4C7" }}>Progress</Text>
-              <Text style={{ color: "#FFF", fontWeight: "700" }}>
-                {Math.round(total.progress * 100)}%
-              </Text>
-            </View>
-            <View
-              accessibilityLabel={`Collection progress ${Math.round(total.progress * 100)} percent`}
-              style={{
-                height: 7,
-                backgroundColor: "#486057",
-                borderRadius: 8,
-                overflow: "hidden",
-              }}
-            >
+          {!paymentFilter && (
+            <>
               <View
-                style={{
-                  height: 7,
-                  width: `${total.progress * 100}%`,
-                  backgroundColor: "#8CD9B2",
-                }}
-              />
-            </View>
-          </View>
-          <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 10 }}>
-            {[
-              ["Remaining", money(total.remaining)],
-              ["Expected", money(total.expected)],
-              ["Paid", String(total.paid)],
-              ["Unpaid / Partial", String(total.outstanding)],
-            ].map(([label, value]) => (
-              <View
-                key={label}
-                style={[s.card, { width: metrics.summaryWidth, padding: 14 }]}
+                style={[
+                  s.card,
+                  {
+                    backgroundColor: colors.ink,
+                    borderColor: colors.ink,
+                    padding: 20,
+                  },
+                ]}
               >
-                <Text style={s.label}>{label}</Text>
+                <Text
+                  style={{ color: "#BCD4C7", fontSize: 13, fontWeight: "600" }}
+                >
+                  Collected
+                </Text>
                 <Text
                   adjustsFontSizeToFit
                   numberOfLines={1}
-                  style={[s.amount, { fontSize: 21 }]}
+                  style={{
+                    color: "#FFF",
+                    fontSize: 34,
+                    fontWeight: "800",
+                    letterSpacing: -1,
+                  }}
                 >
-                  {value}
+                  {money(total.collected)}
                 </Text>
+                <View style={s.between}>
+                  <Text style={{ color: "#BCD4C7" }}>Progress</Text>
+                  <Text style={{ color: "#FFF", fontWeight: "700" }}>
+                    {Math.round(total.progress * 100)}%
+                  </Text>
+                </View>
+                <View
+                  accessibilityLabel={`Collection progress ${Math.round(total.progress * 100)} percent`}
+                  style={{
+                    height: 7,
+                    backgroundColor: "#486057",
+                    borderRadius: 8,
+                    overflow: "hidden",
+                  }}
+                >
+                  <View
+                    style={{
+                      height: 7,
+                      width: `${total.progress * 100}%`,
+                      backgroundColor: "#8CD9B2",
+                    }}
+                  />
+                </View>
               </View>
-            ))}
-          </View>
-          <View style={s.row}>
-            <View style={{ flex: 1 }}>
-              <Button
-                title="Add Tenant"
-                secondary
-                onPress={() => router.push("/tenant")}
-              />
-            </View>
-            <View style={{ flex: 1 }}>
-              <Button
-                title="Record Payment"
-                onPress={() =>
-                  router.push({ pathname: "/payment", params: { month } })
-                }
-              />
-            </View>
-          </View>
+              <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 10 }}>
+                {[
+                  { label: "Remaining", value: money(total.remaining) },
+                  { label: "Expected", value: money(total.expected) },
+                  {
+                    label: "Fully Paid",
+                    value: String(total.paid),
+                    filter: "paid",
+                  },
+                  {
+                    label: "Unpaid / Partial",
+                    value: String(total.outstanding),
+                    filter: "outstanding",
+                  },
+                ].map(({ label, value, filter }) => {
+                  const content = (
+                    <>
+                      <Text style={s.label}>{label}</Text>
+                      <Text
+                        adjustsFontSizeToFit
+                        numberOfLines={1}
+                        style={[s.amount, { fontSize: 21 }]}
+                      >
+                        {value}
+                      </Text>
+                    </>
+                  );
+                  const style = [
+                    s.card,
+                    { width: metrics.summaryWidth, padding: 14 },
+                  ];
+                  return filter ? (
+                    <Pressable
+                      key={label}
+                      style={style}
+                      accessibilityRole="button"
+                      accessibilityLabel={`${label}, ${value} tenants`}
+                      accessibilityHint="Opens the matching list for this billing month"
+                      onPress={() =>
+                        router.push({
+                          pathname: "/payment-status",
+                          params: { status: filter },
+                        })
+                      }
+                    >
+                      {content}
+                    </Pressable>
+                  ) : (
+                    <View key={label} style={style}>
+                      {content}
+                    </View>
+                  );
+                })}
+              </View>
+              <View style={s.row}>
+                <View style={{ flex: 1 }}>
+                  <Button
+                    title="Add Tenant"
+                    secondary
+                    onPress={() => router.push("/tenant")}
+                  />
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Button
+                    title="Record Payment"
+                    onPress={() =>
+                      router.push({ pathname: "/payment", params: { month } })
+                    }
+                  />
+                </View>
+              </View>
+            </>
+          )}
           <View style={{ gap: 12 }}>
             <Text style={s.h2}>Tenants</Text>
             <Field
@@ -155,10 +219,20 @@ export default function Monthly({ records = false }: { records?: boolean }) {
               value={search}
               onChangeText={setSearch}
             />
-            {!data.length ? (
+            {!matchingStatus?.length ? (
               <Empty
-                title="No Charges"
-                detail="Add a tenant or choose another month."
+                title={
+                  paymentFilter === "paid"
+                    ? "No fully paid tenants"
+                    : paymentFilter === "outstanding"
+                      ? "No unpaid or partial balances"
+                      : "No Charges"
+                }
+                detail={
+                  paymentFilter
+                    ? "For this billing month."
+                    : "Add a tenant or choose another month."
+                }
               />
             ) : !filtered?.length ? (
               <Empty

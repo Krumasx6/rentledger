@@ -4,6 +4,7 @@
   },
   "build": {
     "preview": {
+      "developmentClient": false,
       "credentialsSource": "local",
       "distribution": "internal",
       "android": {
