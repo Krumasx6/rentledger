@@ -44,6 +44,7 @@ const core = source("src/core/ledger");
 const repo = source("src/database/repository");
 const receiptCore = source("src/core/receipts");
 const printing = source("src/core/printing");
+const { PrinterSession } = source("src/core/printerSession");
 function database(filename = ":memory:") {
   const native = new DatabaseSync(filename);
   const db = {
@@ -1009,4 +1010,243 @@ test("receipt owner, previous payments, month label and full/partial status use 
   }
   assert.equal(JSON.parse(first.snapshot).remaining, 200000);
   assert.equal(JSON.parse(last.snapshot).remaining, 0);
+});
+
+function deferred() {
+  let resolve, reject;
+  const promise = new Promise((yes, no) => {
+    resolve = yes;
+    reject = no;
+  });
+  return { promise, resolve, reject };
+}
+
+test("saving during an active reconnect waits and sends the saved receipt exactly once", async (t) => {
+  const { db, charge } = await paymentSetup(t);
+  const ready = deferred();
+  let connected = false,
+    writes = 0,
+    connects = 0;
+  const transport = {
+    supported: () => true,
+    isConnected: async () => connected,
+    connect: async () => {
+      connects++;
+      await ready.promise;
+      connected = true;
+    },
+    write: async () => {
+      writes++;
+    },
+  };
+  const session = new PrinterSession(transport, () => ({
+    selected: { id: "saved" },
+    reconnect: true,
+  }));
+  const background = session.run(() => transport.connect());
+  const printer = printerFor(db, {
+    ...transport,
+    prepare: () => session.prepare(),
+  });
+  const resultPromise = printing.persistThenPrint(
+    () => repo.savePayment(db, payment(charge.id, 100000)),
+    (r) => printer.print(r, 58),
+    true,
+  );
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal((await repo.entries(db, core.currentMonth()))[0].paid, 100000);
+  assert.equal(writes, 0);
+  ready.resolve();
+  await background;
+  const result = await resultPromise;
+  assert.equal(result.print.status, "transmitted");
+  assert.equal(writes, 1);
+  assert.equal(connects, 1);
+  assert.equal(JSON.parse(result.receipt.snapshot).remaining, 200000);
+  assert.equal((await printer.print(result.receipt, 58)).status, "skipped");
+  assert.equal(writes, 1);
+  assert.equal((await repo.receiptAttempts(db, result.receipt.id)).length, 1);
+});
+
+test("save and print reconnects the remembered printer before sending a full payment", async (t) => {
+  const { db, charge } = await paymentSetup(t);
+  let connected = false,
+    connects = 0,
+    writes = 0;
+  const transport = {
+    supported: () => true,
+    isConnected: async () => connected,
+    connect: async (device, request) => {
+      assert.equal(device.id, "saved");
+      assert.equal(request, false);
+      assert.equal(
+        (await db.getFirstAsync("SELECT COUNT(*) n FROM payments")).n,
+        1,
+      );
+      connects++;
+      connected = true;
+    },
+    write: async (text) => {
+      assert.match(text, /FULLY PAID/);
+      writes++;
+    },
+  };
+  const session = new PrinterSession(transport, () => ({
+    selected: { id: "saved" },
+    reconnect: true,
+  }));
+  const printer = printerFor(db, {
+    ...transport,
+    prepare: () => session.prepare(),
+  });
+  await repo.setSetting(db, "printer", { autoPrint: true });
+  const preferences = await repo.getSetting(db, "printer", {});
+  let savedReceipt;
+  const result = await printing.persistThenPrint(
+    () => repo.savePayment(db, payment(charge.id, 300000)),
+    (r) => printer.print(r, 80),
+    preferences.autoPrint,
+    (r) => {
+      savedReceipt = r.id;
+    },
+  );
+  assert.equal(savedReceipt, result.receipt.id);
+  assert.equal(result.print.status, "transmitted");
+  assert.equal(connects, 1);
+  assert.equal(writes, 1);
+  assert.equal(JSON.parse(result.receipt.snapshot).remaining, 0);
+});
+
+test("failed pre-print reconnect preserves the payment and explicit reprint uses its original receipt", async (t) => {
+  const { db, charge } = await paymentSetup(t);
+  let connected = false,
+    writes = 0,
+    connects = 0;
+  const transport = {
+    supported: () => true,
+    isConnected: async () => connected,
+    connect: async () => {
+      connects++;
+      throw new Error("Printer powered off");
+    },
+    write: async () => {
+      writes++;
+    },
+  };
+  const session = new PrinterSession(transport, () => ({
+    selected: { id: "saved" },
+    reconnect: true,
+  }));
+  const printer = printerFor(db, {
+    ...transport,
+    prepare: () => session.prepare(),
+  });
+  const result = await printing.persistThenPrint(
+    () => repo.savePayment(db, payment(charge.id, 100000)),
+    (r) => printer.print(r, 58),
+    true,
+  );
+  assert.equal(result.print.status, "failed");
+  assert.match(result.print.message, /powered off/);
+  assert.equal(connects, 1);
+  assert.equal(writes, 0);
+  connected = true;
+  assert.equal(
+    (await printer.print(result.receipt, 58, true)).status,
+    "transmitted",
+  );
+  assert.equal(writes, 1);
+  assert.equal(
+    (await db.getFirstAsync("SELECT COUNT(*) n FROM payments")).n,
+    1,
+  );
+  assert.equal(
+    (
+      await db.getFirstAsync(
+        "SELECT ref FROM receipts WHERE id=?",
+        result.receipt.id,
+      )
+    ).ref,
+    result.receipt.ref,
+  );
+});
+
+test("preparation respects paused reconnect and never repeats an uncertain Bluetooth write", async (t) => {
+  const { db, charge } = await paymentSetup(t);
+  let connected = false,
+    writes = 0,
+    connects = 0;
+  const transport = {
+    supported: () => true,
+    isConnected: async () => connected,
+    connect: async () => {
+      connects++;
+      connected = true;
+    },
+    write: async () => {
+      writes++;
+      throw new Error("Connection lost during write");
+    },
+  };
+  let reconnect = false;
+  const session = new PrinterSession(transport, () => ({
+    selected: { id: "saved" },
+    reconnect,
+  }));
+  const printer = printerFor(db, {
+    ...transport,
+    prepare: () => session.prepare(),
+  });
+  const result = await printing.persistThenPrint(
+    () => repo.savePayment(db, payment(charge.id, 100000)),
+    (r) => printer.print(r, 58),
+    true,
+  );
+  assert.equal(result.print.status, "skipped");
+  assert.equal(connects, 0);
+  assert.equal(writes, 0);
+  reconnect = true;
+  assert.equal(
+    (await printer.print(result.receipt, 58, true)).status,
+    "unknown",
+  );
+  assert.equal(connects, 1);
+  assert.equal(writes, 1);
+  assert.equal((await printer.print(result.receipt, 58)).status, "skipped");
+  assert.equal(writes, 1);
+});
+
+test("failed payment persistence never waits for or starts a printer reconnect", async (t) => {
+  const { db, charge } = await paymentSetup(t);
+  let connects = 0;
+  const transport = {
+    supported: () => true,
+    isConnected: async () => false,
+    connect: async () => {
+      connects++;
+    },
+    write: async () => {
+      throw new Error("Must not write");
+    },
+  };
+  const session = new PrinterSession(transport, () => ({
+    selected: { id: "saved" },
+    reconnect: true,
+  }));
+  const printer = printerFor(db, {
+    ...transport,
+    prepare: () => session.prepare(),
+  });
+  await assert.rejects(
+    printing.persistThenPrint(
+      () => repo.savePayment(db, payment(charge.id, 300001)),
+      (r) => printer.print(r, 58),
+      true,
+    ),
+  );
+  assert.equal(connects, 0);
+  assert.equal(
+    (await db.getFirstAsync("SELECT COUNT(*) n FROM payments")).n,
+    0,
+  );
 });

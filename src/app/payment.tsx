@@ -1,5 +1,5 @@
 import { useCallback, useState } from "react";
-import { Text, View } from "react-native";
+import { Keyboard, Text, View } from "react-native";
 import { router, useLocalSearchParams } from "expo-router";
 import { useSQLiteContext } from "../database/context";
 import { randomUUID } from "expo-crypto";
@@ -12,6 +12,7 @@ import {
   Loading,
   MonthPicker,
   Page,
+  ToggleRow,
   confirm,
   s,
   useAction,
@@ -45,6 +46,8 @@ export default function PaymentScreen() {
   const [note, setNote] = useState("");
   const [search, setSearch] = useState("");
   const [notice, setNotice] = useState("");
+  const [savedReceiptId, setSavedReceiptId] = useState("");
+  const [printIssue, setPrintIssue] = useState(false);
   const { busy, run } = useAction();
   const { data, error, refresh } = useLoad(
     useCallback(
@@ -73,6 +76,8 @@ export default function PaymentScreen() {
   const save = () =>
     void run(async () => {
       if (!charge) throw new Error("Choose a tenant.");
+      if (!printer.ready)
+        throw new Error("Printer settings are still loading. Try again.");
       const result = await persistThenPrint(
         () =>
           savePayment(
@@ -91,11 +96,19 @@ export default function PaymentScreen() {
           ),
         (r) => printer.print(r),
         printer.preferences.autoPrint && !edit,
-        () => {
+        (receipt) => {
+          Keyboard.dismiss();
           reset();
+          setSavedReceiptId(receipt.id);
+          setPrintIssue(false);
           setNotice("Payment saved.");
           refresh();
         },
+      );
+      setPrintIssue(
+        !edit &&
+          printer.preferences.autoPrint &&
+          result.print.status !== "transmitted",
       );
       setNotice(
         edit
@@ -106,7 +119,11 @@ export default function PaymentScreen() {
       );
     });
   return (
-    <Page title="Payments" back scrollVersion={edit?.id}>
+    <Page
+      title="Payments"
+      back
+      scrollVersion={`${edit?.id || ""}:${savedReceiptId}`}
+    >
       <MonthPicker
         month={month}
         onChange={(m) => {
@@ -117,9 +134,24 @@ export default function PaymentScreen() {
       />
       {notice && (
         <Card>
-          <Text accessibilityLiveRegion="polite" style={{ color: "#157354" }}>
+          <Text
+            accessibilityLiveRegion="polite"
+            style={{ color: printIssue ? "#986318" : "#157354" }}
+          >
             {notice}
           </Text>
+          {!!savedReceiptId && (
+            <Button
+              title="View Receipt"
+              secondary
+              onPress={() =>
+                router.push({
+                  pathname: "/receipt",
+                  params: { receiptId: savedReceiptId },
+                })
+              }
+            />
+          )}
         </Card>
       )}
       {error ? (
@@ -244,11 +276,34 @@ export default function PaymentScreen() {
                 multiline
               />
               <Text style={s.subtitle}>Billing month: {month}.</Text>
+              {!edit && (
+                <>
+                  <ToggleRow
+                    label="Print after saving"
+                    value={printer.preferences.autoPrint}
+                    disabled={busy || !printer.ready}
+                    onChange={(autoPrint) =>
+                      void run(() => printer.update({ autoPrint }))
+                    }
+                  />
+                  {!printer.preferences.autoPrint && (
+                    <Text style={s.subtitle}>Auto-print is off.</Text>
+                  )}
+                </>
+              )}
               <Button
                 title={
-                  busy ? "Saving…" : edit ? "Save Changes" : "Save Payment"
+                  busy
+                    ? printer.printState === "sending"
+                      ? "Sending receipt…"
+                      : "Saving…"
+                    : edit
+                      ? "Save Changes"
+                      : printer.preferences.autoPrint
+                        ? "Save & Print"
+                        : "Save Payment"
                 }
-                disabled={busy}
+                disabled={busy || !printer.ready}
                 onPress={() =>
                   edit
                     ? confirm(

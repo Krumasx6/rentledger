@@ -14,6 +14,7 @@ import { bluetooth, Device } from "./bluetooth";
 import { PaperWidth, Receipt, receiptText, localTime } from "../core/receipts";
 import { localDate } from "../core/ledger";
 import { PrintCoordinator, PrintResult } from "../core/printing";
+import { PrinterSession } from "../core/printerSession";
 import {
   claimPrint,
   finishPrint,
@@ -55,12 +56,23 @@ function validPreferences(value: PrinterPreferences): PrinterPreferences {
 class PrinterEngine {
   private preferences = defaults;
   readonly coordinator: PrintCoordinator;
+  readonly session: PrinterSession<Device>;
   constructor(
     db: Parameters<typeof claimPrint>[0],
     notify: (state: string) => void,
+    connection: (state: string) => void,
   ) {
-    this.coordinator = new PrintCoordinator(
+    this.session = new PrinterSession(
       bluetooth,
+      () => this.preferences,
+      connection,
+    );
+    this.coordinator = new PrintCoordinator(
+      {
+        prepare: () => this.session.prepare(),
+        isConnected: () => bluetooth.isConnected(),
+        write: (text) => bluetooth.write(text),
+      },
       {
         claim: (r, reprint) =>
           claimPrint(
@@ -90,9 +102,12 @@ function usePrinterController() {
   const [devices, setDevices] = useState<Device[]>([]);
   const [ready, setReady] = useState(false);
   const [revision, setRevision] = useState(0);
-  const operation = useRef(false);
   const nextRetry = useRef(0);
-  const engine = useMemo(() => new PrinterEngine(db, setPrintState), [db]);
+  const engine = useMemo(
+    () => new PrinterEngine(db, setPrintState, setConnection),
+    [db],
+  );
+  const session = engine.session;
   const coordinator = engine.coordinator;
   const update = useCallback(
     async (patch: Partial<PrinterPreferences>) => {
@@ -127,27 +142,27 @@ function usePrinterController() {
   }, [db, revision, engine]);
   const connect = useCallback(
     async (device: Device, request = true) => {
-      if (operation.current || coordinator.isBusy)
+      if (session.isBusy || coordinator.isBusy)
         throw new Error("Printer is busy. Wait for the current operation.");
-      operation.current = true;
-      setConnection("connecting");
-      try {
-        await bluetooth.connect(device, request);
-        await update({ selected: device, reconnect: true });
-        setConnection("connected");
-        setMessage("Connected.");
-      } catch (e) {
-        setConnection("error");
-        setMessage(
-          e instanceof Error ? e.message : "Could not connect printer.",
-        );
-        throw e;
-      } finally {
-        operation.current = false;
-        nextRetry.current = Date.now() + 30000;
-      }
+      return session.run(async () => {
+        setConnection("connecting");
+        try {
+          await bluetooth.connect(device, request);
+          await update({ selected: device, reconnect: true });
+          setConnection("connected");
+          setMessage("Connected.");
+        } catch (e) {
+          setConnection("error");
+          setMessage(
+            e instanceof Error ? e.message : "Could not connect printer.",
+          );
+          throw e;
+        } finally {
+          nextRetry.current = Date.now() + 30000;
+        }
+      });
     },
-    [coordinator, update],
+    [coordinator, session, update],
   );
   useEffect(() => {
     if (!ready) return;
@@ -156,7 +171,7 @@ function usePrinterController() {
     const tick = async () => {
       if (
         checking ||
-        operation.current ||
+        session.isBusy ||
         coordinator.isBusy ||
         AppState.currentState !== "active"
       )
@@ -195,49 +210,41 @@ function usePrinterController() {
       clearInterval(timer);
       sub.remove();
     };
-  }, [ready, coordinator, connect, engine]);
+  }, [ready, coordinator, connect, engine, session]);
   const discover = async () => {
-    if (operation.current || coordinator.isBusy)
+    if (session.isBusy || coordinator.isBusy)
       throw new Error("Printer is busy.");
-    operation.current = true;
-    setConnection("discovering");
-    try {
-      const found = await bluetooth.discover();
-      setDevices(found);
-      setMessage(
-        found.length
-          ? "Select your receipt printer."
-          : "No printers found. Check power and Bluetooth.",
-      );
-    } catch (e) {
-      setMessage(e instanceof Error ? e.message : "Discovery failed.");
-      throw e;
-    } finally {
-      operation.current = false;
-      setConnection(
-        (await bluetooth.isConnected()) ? "connected" : "disconnected",
-      );
-    }
+    return session.run(async () => {
+      setConnection("discovering");
+      try {
+        const found = await bluetooth.discover();
+        setDevices(found);
+        setMessage(
+          found.length
+            ? "Select your receipt printer."
+            : "No printers found. Check power and Bluetooth.",
+        );
+      } catch (e) {
+        setMessage(e instanceof Error ? e.message : "Discovery failed.");
+        throw e;
+      } finally {
+        setConnection(
+          (await bluetooth.isConnected()) ? "connected" : "disconnected",
+        );
+      }
+    });
   };
   const disconnect = async () => {
-    if (operation.current || coordinator.isBusy)
+    if (session.isBusy || coordinator.isBusy)
       throw new Error("Wait until sending finishes before disconnecting.");
-    operation.current = true;
-    try {
+    return session.run(async () => {
       await update({ reconnect: false });
       await bluetooth.disconnect();
       setConnection("disconnected");
       setMessage("Auto-reconnect paused.");
-    } finally {
-      operation.current = false;
-    }
+    });
   };
   const print = async (r: Receipt, reprint = false): Promise<PrintResult> => {
-    if (operation.current)
-      return {
-        status: "skipped",
-        message: "Printer busy. Reprint from Receipts.",
-      };
     const result = await coordinator.print(
       r,
       engine.getPreferences().width,
@@ -250,51 +257,50 @@ function usePrinterController() {
     return result;
   };
   const test = async () => {
-    if (operation.current || coordinator.isBusy)
+    if (session.isBusy || coordinator.isBusy)
       throw new Error("Printer is busy.");
-    operation.current = true;
-    setPrintState("sending");
-    try {
-      if (!(await bluetooth.isConnected()))
-        throw new Error("Connect a supported printer first.");
-      const snapshot = {
-        business: await getBusiness(db),
-        tenantName: "TEST - NOT A PAYMENT",
-        room: "TEST",
-        month: localDate().slice(0, 7),
-        charge: 300000,
-        amount: 100000,
-        remaining: 200000,
-        date: localDate(),
-        time: localTime(),
-        recordedAt: "",
-        method: "Test only",
-        reference: "",
-        legacy: false,
-      };
-      await bluetooth.write(
-        receiptText(
-          {
-            id: "test",
-            ref: "TEST-NO-TRANSACTION",
-            paymentId: null,
-            revision: 1,
-            snapshot: JSON.stringify(snapshot),
-            voidReason: "",
-            createdAt: "",
-          },
-          engine.getPreferences().width,
-        ),
-      );
-      setPrintState("transmitted");
-      setMessage("Test data sent. Check the paper.");
-    } catch (e) {
-      setPrintState("unknown");
-      setMessage("Test send interrupted. Check paper before retrying.");
-      throw e;
-    } finally {
-      operation.current = false;
-    }
+    return session.run(async () => {
+      setPrintState("sending");
+      try {
+        if (!(await bluetooth.isConnected()))
+          throw new Error("Connect a supported printer first.");
+        const snapshot = {
+          business: await getBusiness(db),
+          tenantName: "TEST - NOT A PAYMENT",
+          room: "TEST",
+          month: localDate().slice(0, 7),
+          charge: 300000,
+          amount: 100000,
+          remaining: 200000,
+          date: localDate(),
+          time: localTime(),
+          recordedAt: "",
+          method: "Test only",
+          reference: "",
+          legacy: false,
+        };
+        await bluetooth.write(
+          receiptText(
+            {
+              id: "test",
+              ref: "TEST-NO-TRANSACTION",
+              paymentId: null,
+              revision: 1,
+              snapshot: JSON.stringify(snapshot),
+              voidReason: "",
+              createdAt: "",
+            },
+            engine.getPreferences().width,
+          ),
+        );
+        setPrintState("transmitted");
+        setMessage("Test data sent. Check the paper.");
+      } catch (e) {
+        setPrintState("unknown");
+        setMessage("Test send interrupted. Check paper before retrying.");
+        throw e;
+      }
+    });
   };
   return {
     preferences,

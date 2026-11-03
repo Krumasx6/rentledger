@@ -5,6 +5,7 @@ export type PrintStore = {
   finish: (attemptId: string, result: PrintResult) => Promise<void>;
 };
 export type PrinterTransport = {
+  prepare?: () => Promise<void>;
   isConnected: () => Promise<boolean>;
   write: (text: string) => Promise<void>;
 };
@@ -44,6 +45,7 @@ export class PrintCoordinator {
           message: "Already attempted. Confirm a reprint from Receipts.",
         };
       this.notify("checking");
+      await this.transport.prepare?.();
       let result: PrintResult;
       if (!(await this.transport.isConnected()))
         result = {
@@ -90,10 +92,10 @@ export async function persistThenPrint(
   save: () => Promise<Receipt>,
   print: (receipt: Receipt) => Promise<PrintResult>,
   enabled: boolean,
-  onSaved: () => void = () => {},
+  onSaved: (receipt: Receipt) => void = () => {},
 ) {
   const receipt = await save();
-  onSaved();
+  onSaved(receipt);
   if (!enabled)
     return {
       receipt,

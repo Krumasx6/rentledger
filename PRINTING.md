@@ -75,6 +75,14 @@ Reconnect checks run while the app is active, with at most one connection attemp
 
 ## Print results
 
+### Save and print (November 3, 2026)
+
+On the payment form, enable **Print after saving**. This is the same SQLite-backed preference as **Auto-print Receipts** in Printer Settings; it remains off until enabled. The action then reads **Save & Print**. Saving is disabled while preferences initially load so it cannot silently use an unloaded default. Corrections continue to require an explicit reprint.
+
+After the payment and receipt commit, the form clears and shows the saved receipt. The print attempt waits for an in-progress printer connection operation instead of skipping it as busy. If disconnected, a remembered printer gets one connection attempt when Auto-reconnect is enabled. A manually disconnected printer respects the paused reconnect setting. No write is automatically retried, because a failed write might already have produced paper. Failures show a warning and **View Receipt** without creating another payment.
+
+These changes use existing native APIs and do not add a native dependency. An existing compatible development client can load them through Metro. An installed standalone APK needs an updated application bundle/build. Five additional regression tests cover saving during reconnect, reconnect before a full-payment print, reconnect failure and original-receipt reprint, paused reconnect/uncertain writes, and failed persistence preventing all connection/print activity. The current suite has 45 tests. Physical printer output remains unverified here.
+
 The UI exposes connection/discovery state and print state. Persisted attempts are `sending`, `transmitted`, `skipped`, `failed`, or `unknown`.
 
 - **Transmitted:** the transport accepted the data. It does **not** prove paper was printed, paper is present, or the output was readable.
