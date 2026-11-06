@@ -26,7 +26,12 @@ import {
   shiftMonth,
   status,
 } from "../core/ledger";
-import { archiveTenant, entries, saveTenant } from "../database/repository";
+import {
+  archiveTenant,
+  entries,
+  restoreTenant,
+  saveTenant,
+} from "../database/repository";
 import { useLoad, useMonth } from "../hooks/useLedger";
 type History = {
   id: string;
@@ -55,7 +60,7 @@ export default function TenantScreen() {
   });
   const [rent, setRent] = useState("");
   const [due, setDue] = useState("1");
-  const [end, setEnd] = useState(currentMonth());
+  const [end, setEnd] = useState(shiftMonth(currentMonth(), -1));
   const load = useCallback(async () => {
     if (!id) return null;
     const tenant = await db.getFirstAsync<Tenant>(
@@ -70,7 +75,7 @@ export default function TenantScreen() {
       tenant.endMonth ||
         (tenant.startMonth > currentMonth()
           ? tenant.startMonth
-          : currentMonth()),
+          : shiftMonth(currentMonth(), -1)),
     );
     const monthly = (await entries(db, month)).find((e) => e.tenantId === id);
     const history = await db.getAllAsync<History>(
@@ -330,7 +335,10 @@ export default function TenantScreen() {
               <Card>
                 <Text style={s.h2}>Archive tenant</Text>
                 <Text style={s.subtitle}>
-                  History is kept. Later unpaid charges will be removed.
+                  They stop getting new charges after the final billing month.
+                  Existing charges, payments and receipts stay in the records.
+                  The default is last month; choose this month if rent is still
+                  due.
                 </Text>
                 <Field
                   label="Final billing month (YYYY-MM)"
@@ -349,6 +357,56 @@ export default function TenantScreen() {
                       () =>
                         void run(async () => {
                           await archiveTenant(db, id!, end);
+                          refresh();
+                        }),
+                      true,
+                    )
+                  }
+                />
+              </Card>
+            )}
+            {!!data.tenant.endMonth && (
+              <Card>
+                <Text style={s.h2}>Archived</Text>
+                <Text style={s.subtitle}>
+                  No new charges are created after{" "}
+                  {monthLabel(data.tenant.endMonth)}. Restore to make this
+                  tenant active again.
+                </Text>
+                <Field
+                  label="Final billing month (YYYY-MM)"
+                  value={end}
+                  onChangeText={setEnd}
+                  maxLength={7}
+                />
+                <Button
+                  title={busy ? "Updating…" : "Update final month"}
+                  disabled={busy}
+                  secondary
+                  onPress={() =>
+                    confirm(
+                      "Update final billing month?",
+                      `Charges after ${end} will be removed if unpaid. Existing payments and receipts are preserved.`,
+                      () =>
+                        void run(async () => {
+                          await archiveTenant(db, id!, end);
+                          refresh();
+                        }),
+                      true,
+                    )
+                  }
+                />
+                <Button
+                  title={busy ? "Restoring…" : "Restore tenant"}
+                  disabled={busy}
+                  secondary
+                  onPress={() =>
+                    confirm(
+                      "Restore tenant?",
+                      "This tenant will be active again and can receive charges for new months.",
+                      () =>
+                        void run(async () => {
+                          await restoreTenant(db, id!);
                           refresh();
                         }),
                       true,

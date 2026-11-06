@@ -84,8 +84,9 @@ export default function BackupScreen() {
         <Card>
           <Text style={s.h2}>Restore Backup</Text>
           <Text style={s.text}>
-            {pending.tenants.length} tenants ? {pending.charges.length} charges
-            ? {pending.payments.length} payments
+            {pending.tenants.length} tenants · {pending.charges.length} charges
+            · {pending.payments.length} payments · {pending.expenses.length}{" "}
+            expenses
           </Text>
           <Text style={s.subtitle}>
             Saved {new Date(pending.exportedAt).toLocaleString("en-PH")}

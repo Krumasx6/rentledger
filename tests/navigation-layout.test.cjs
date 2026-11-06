@@ -74,6 +74,49 @@ test("legacy printer and business links redirect to canonical settings screens",
     assert.ok(text.includes(to));
   }
 });
+
+test("main navigation has four visible tabs and retains access to old records", () => {
+  const filename = path.join(root, "src/app/(tabs)/_layout.tsx");
+  const source = ts.createSourceFile(
+    filename,
+    fs.readFileSync(filename, "utf8"),
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.TSX,
+  );
+  const visible = [];
+  function visit(n) {
+    if (
+      ts.isJsxSelfClosingElement(n) &&
+      n.tagName.getText(source) === "Tabs.Screen"
+    ) {
+      const attributes = n.attributes.properties;
+      const name = attributes.find((x) => x.name?.getText(source) === "name")
+        ?.initializer?.text;
+      const options = attributes.find(
+        (x) => x.name?.getText(source) === "options",
+      )?.initializer?.expression;
+      const hidden =
+        options &&
+        ts.isObjectLiteralExpression(options) &&
+        options.properties.some(
+          (x) =>
+            x.name?.getText(source) === "href" &&
+            x.initializer?.kind === ts.SyntaxKind.NullKeyword,
+        );
+      if (!hidden) visible.push(name);
+    }
+    ts.forEachChild(n, visit);
+  }
+  visit(source);
+  assert.deepEqual(visible, ["index", "tenants", "finances", "settings"]);
+  assert.ok(fs.existsSync(path.join(root, "src/app/expense.tsx")));
+  const oldRecords = fs.readFileSync(
+    path.join(root, "src/app/(tabs)/records.tsx"),
+    "utf8",
+  );
+  assert.ok(oldRecords.includes('href="/payment-history"'));
+});
 test("tab bar leaves measured gesture and three-button navigation insets below touch targets", () => {
   for (const bottom of [0, 16, 24, 34, 48]) {
     const m = tabMetrics(bottom);

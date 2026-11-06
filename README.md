@@ -42,7 +42,11 @@ Export your Expo Go ledger and import it into the installed APK to transfer exis
 
 ## Features
 
-- **Dashboard:** month navigation, collected and expected rent, remaining balance, fully paid and outstanding counts, collection progress, tenant search, and quick actions. Outstanding charges sort first.
+Navigation: **Home, Tenants, Finances, Settings**. Payment History is available from Finances and Settings; tenant payment history and receipt reprints remain available.
+
+- **Finances:** cash income by payment date, dated expenses, category breakdown, and monthly net profit/loss. Add, edit, or delete expenses locally. See [FINANCES.md](FINANCES.md).
+
+- **Home:** month navigation, collected and expected rent, remaining balance, fully paid and outstanding counts, collection progress, tenant search, and quick actions. Outstanding charges sort first.
 - **Tenants:** create and edit contact details, room, rent, due day, and notes; choose a rental start month; view monthly balances and payment history; archive without losing historical records.
 - **Records and payments:** browse past and future billing months, record partial or full payments, keep multiple payments per charge, and correct or delete mistakes with confirmation. Each payment has a stable receipt identifier, date, billing month, amount, and optional note.
 - **Settings:** share JSON backups, validate imports, review counts, and explicitly confirm replacement. Includes device-only storage guidance and an About screen.
@@ -50,11 +54,11 @@ Export your Expo Go ledger and import it into the installed APK to transfer exis
 ## Accounting and storage rules
 
 - The source of truth is `rentledger.db` in the app's SQLite storage, provided by `SQLiteProvider`. Records survive app restarts. React state holds form input and view selection, not financial records.
-- Version 3 migrations use `PRAGMA user_version`, WAL journaling, foreign keys, checks, indexes, and a unique `(tenantId, month)` charge key. Existing version-1 and version-2 databases upgrade transactionally, preserving tenants, rental rates, charges, payments, and settings. Newer unknown database versions are rejected rather than overwritten.
+- Version 4 migrations use `PRAGMA user_version`, WAL journaling, foreign keys, checks, indexes, and a unique `(tenantId, month)` charge key. Existing version-1, version-2, and version-3 databases upgrade transactionally, preserving tenants, rental rates, charges, payments, and settings. Newer unknown database versions are rejected rather than overwritten.
 - Due days accept whole numbers from **1 to 31**. When a month is shorter than the chosen due day, the actual due date is that month's final day: day 31 becomes April 30, February 28, or February 29 in a leap year. The recurring due day remains unchanged, so March still uses March 31. Monthly charge snapshots preserve the due-day terms that were originally charged.
-- Tables: `tenants`, `rates` (effective-month rental terms), `charges` (monthly snapshots), `payments` (individual transactions), `settings` (business/printer preferences), `receipts` (immutable snapshots and correction history), and `print_attempts` (transmission outcomes).
+- Tables: `tenants`, `rates` (effective-month rental terms), `charges` (monthly snapshots), `payments` (individual transactions), `settings` (business/printer preferences), `receipts` (immutable snapshots and correction history), `print_attempts` (transmission outcomes), and `expenses` (dated cash costs with creation/update timestamps).
 - Monetary values are integer centavos. Decimal input accepts at most two places; extra precision, non-finite values, zero, negative amounts, and amounts above ₱1 billion are rejected. There is no floating-point money rounding.
-- Month keys are local `YYYY-MM`; payment dates are validated local calendar `YYYY-MM-DD`. UTC conversion is used only for the backup's export timestamp.
+- Month keys are local `YYYY-MM`; payment dates are validated local calendar `YYYY-MM-DD`. Record timestamps and backup export timestamps use ISO time; accounting periods use local calendar dates.
 - Eligible monthly charges are generated **on opening that billing month**, using `INSERT OR IGNORE`. No charge is generated before the rental start month or after the archived final month. Unopened months can be visited later without losing their original rental terms.
 - A new tenant's first rate starts in their rental start month. Editing rent or due day takes effect next calendar month, or the rental start month if that is further in the future. Existing charges are never rewritten, including future charges already opened. The edit form explicitly explains this rule. A rate timeline prevents a newly edited rent from leaking into an ungenerated historical month.
 - Collected is payments **applied to the selected billing month**, regardless of their actual payment dates. Expected is that month's stored charges. Remaining is the sum of `max(0, charge − payments)` per charge. Progress is zero for an empty month. Status is UNPAID, PARTIAL, or PAID according to the recorded amount.
@@ -69,9 +73,9 @@ Export your Expo Go ledger and import it into the installed APK to transfer exis
 2. In Android's share sheet choose a file-saving destination or an app that stores the JSON outside RentLedger. A locally stored destination works without internet. Availability of individual destinations depends on your phone.
 3. Verify that the JSON file is present and readable in that destination before changing phones or clearing Expo Go storage. Dismissing the share sheet does not prove a file was saved.
 4. On the receiving phone open **Settings → Backup & Restore → Choose Backup File** and select the saved JSON. The picker copies it into app cache for reading.
-5. Review tenant, charge, and payment counts, export time, and the replacement warning. Export the current ledger first if needed. Select **Replace records with this backup** and confirm.
+5. Review tenant, charge, payment, and expense counts, export time, and the replacement warning. Export the current ledger first if needed. Select **Replace records with this backup** and confirm.
 
-New JSON backups use `schemaVersion: 3` and include `exportedAt`, tenants, rates, charges, payments, and settings. Original version-1 and version-2 backups remain importable. Version 3 also preserves receipt snapshots and print attempts; older APKs cannot read version-3 backups, so use the updated app when restoring them. Validation checks record types and field bounds, identifiers and uniqueness, rental periods, dates, positive integer monetary values, due days, rate coverage, foreign-key relationships, duplicate tenant/month charges, and overpayments. Files are limited to 20 MB and each collection to 100,000 records. Validation finishes **before deletion**. Replacement then occurs inside one transaction, including a final foreign-key check; a failure rolls back the entire restore.
+New JSON backups use `schemaVersion: 4` and include `exportedAt`, tenants, rates, charges, payments, settings, receipt snapshots, print attempts, and expenses. Versions 1–3 remain importable. Older backups contain no expenses and restore with an empty expense list. Older APKs cannot read version-4 backups; restore with version 1.1.0 or newer. Validation checks record types and field bounds, identifiers and uniqueness, rental periods, dates, positive integer monetary values, due days, rate coverage, foreign-key relationships, duplicate tenant/month charges, and overpayments. Files are limited to 20 MB and each collection to 100,000 records. Validation finishes **before deletion**. Replacement then occurs inside one transaction, including a final foreign-key check; a failure rolls back the entire restore.
 
 Export files are staged in app documents and retained so a receiving Android app can read the shared URI after the chooser closes. These internal copies are not a replacement for saving externally and disappear if app storage is cleared. Picked cache copies are removed after reading. JSON backups are readable, unencrypted personal data; store them privately.
 
@@ -82,7 +86,7 @@ All backup modules are SDK-matched Expo modules. Android's actual picker/share i
 ```text
 src/app/          Expo Router tabs and detail/form routes
 src/components/   Reusable mobile UI primitives and action guards
-src/screens/      Shared monthly dashboard and records screen
+src/screens/      Monthly dashboard, finances, records, and backup screens
 src/hooks/        Focus-based loading and shared month selection
 src/core/         Pure dates, centavos, status, totals, backup validation
 src/database/     Schema, migrations, transactional repository
@@ -113,3 +117,9 @@ Settings now includes Bluetooth printer selection, connection status, 58/80 mm l
 ## Navigation and mobile layout
 
 Settings includes separate Bluetooth Printer and Business Information screens. Owner/manager details appear on new receipt snapshots. Tabs and standalone screens share measured safe-area handling, keyboard-aware scrolling, and concise labels. See [UI_QA.md](UI_QA.md) for layout ownership, checks, physical-device testing, and development-build commands.
+
+## Expenses and profit (1.1.0)
+
+Home keeps billing-month rent collection and remaining balances. Its compact Net Profit/Net Loss card opens Finances. Finances sums actual payments by their payment date and expenses by expense date, then subtracts expenses from cash income. A late October payment received in November counts in November cash income while still settling October rent. Negative results are shown as a loss. No month transition erases records.
+
+Expense forms support free-text descriptions, optional categories/notes, default category shortcuts, exact centavos, guarded saves, and confirmed edits/deletes. Database version 4 adds the expenses table and date indexes without replacing prior records. No native dependencies were added. The existing 1.0.1 APK does not acquire this feature automatically; an updated standalone APK must be built for deployment. A compatible development client or Expo Go can load this source through Metro (Bluetooth retains its existing native-build requirement).

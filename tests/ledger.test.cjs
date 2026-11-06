@@ -45,6 +45,7 @@ const repo = source("src/database/repository");
 const receiptCore = source("src/core/receipts");
 const printing = source("src/core/printing");
 const { PrinterSession } = source("src/core/printerSession");
+const finances = source("src/core/finances");
 function database(filename = ":memory:") {
   const native = new DatabaseSync(filename);
   const db = {
@@ -125,7 +126,7 @@ test("fresh migration has no production fixtures and foreign keys enabled", asyn
   await repo.migrate(db);
   assert.equal((await repo.allTenants(db)).length, 0);
   assert.equal((await db.getFirstAsync("PRAGMA foreign_keys")).foreign_keys, 1);
-  assert.equal((await db.getFirstAsync("PRAGMA user_version")).user_version, 3);
+  assert.equal((await db.getFirstAsync("PRAGMA user_version")).user_version, 4);
 });
 test("initial start, idempotent charges, partial/full payments, overpayment and historical totals", async (t) => {
   const db = await setup(t);
@@ -193,6 +194,18 @@ test("archive preserves historical payments, removes only unpaid future charges 
   await repo.archiveTenant(db, person.id, now);
   assert.equal((await repo.entries(db, future)).length, 0);
   assert.equal((await repo.entries(db, now))[0].paid, 100000);
+});
+test("restoring an archived tenant reactivates future charge generation", async (t) => {
+  const db = await setup(t);
+  const person = tenant();
+  await repo.saveTenant(db, person, true);
+  const now = person.startMonth;
+  const future = core.shiftMonth(now, 1);
+  await repo.entries(db, now);
+  await repo.archiveTenant(db, person.id, now);
+  assert.equal((await repo.entries(db, future)).length, 0);
+  await repo.restoreTenant(db, person.id);
+  assert.equal((await repo.entries(db, future)).length, 1);
 });
 test("payment edit/delete updates totals and validates dates and balance", async (t) => {
   const db = await setup(t);
@@ -411,7 +424,7 @@ test("late due days persist through charges, backup and restore without changing
   for (const c of rows)
     assert.equal(core.dueDate(c.month, c.dueDay), "2024-02-29");
   const backup = await repo.exportData(db);
-  assert.equal(backup.schemaVersion, 3);
+  assert.equal(backup.schemaVersion, 4);
   await repo.restoreData(restored, JSON.parse(JSON.stringify(backup)));
   assert.equal((await repo.entries(restored, "2024-02")).length, 3);
   assert.equal(
@@ -449,7 +462,7 @@ test("version-1 database upgrade preserves every record and enables 31 in all ta
   const after = await legacySnapshot(db);
   for (const key of ["tenants", "rates", "charges", "payments", "settings"])
     assert.deepEqual(after[key], before[key]);
-  assert.equal((await db.getFirstAsync("PRAGMA user_version")).user_version, 3);
+  assert.equal((await db.getFirstAsync("PRAGMA user_version")).user_version, 4);
   assert.equal((await db.getFirstAsync("PRAGMA foreign_keys")).foreign_keys, 1);
   assert.equal((await db.getAllAsync("PRAGMA foreign_key_check")).length, 0);
   await repo.saveTenant(db, { ...person, dueDay: 31 }, false);
@@ -502,14 +515,14 @@ test("failed schema upgrade rolls back tables, data and version and can be retri
   assert.equal((await repo.entries(db, person.startMonth))[0].paid, 100000);
 });
 
-test("version-1 JSON backups remain importable by version 3", async (t) => {
+test("version-1 JSON backups remain importable by version 4", async (t) => {
   const db = await setup(t);
   const restored = await setup(t);
   const person = tenant();
   await repo.saveTenant(db, person, true);
   await repo.entries(db, person.startMonth);
   const old = { ...(await repo.exportData(db)), schemaVersion: 1 };
-  assert.equal(core.validateBackup(old).schemaVersion, 3);
+  assert.equal(core.validateBackup(old).schemaVersion, 4);
   await repo.restoreData(restored, old);
   assert.equal((await repo.allTenants(restored))[0].id, person.id);
 });
@@ -1249,4 +1262,346 @@ test("failed payment persistence never waits for or starts a printer reconnect",
     (await db.getFirstAsync("SELECT COUNT(*) n FROM payments")).n,
     0,
   );
+});
+
+const expense = (overrides = {}) => ({
+  id: randomUUID(),
+  description: "Kuryente",
+  category: "Utilities",
+  amount: 125050,
+  date: "2026-11-03",
+  notes: "",
+  ...overrides,
+});
+
+test("expense add/edit/delete uses exact centavos, stable identity, timestamps and date-based reports", async (t) => {
+  const db = await setup(t);
+  const e = expense({
+    description: "  Cleaners' fee  ",
+    category: " Cleaning ",
+    notes: " weekly ",
+  });
+  await repo.saveExpense(db, e);
+  const stored = await repo.getExpense(db, e.id);
+  assert.equal(stored.description, "Cleaners' fee");
+  assert.equal(stored.category, "Cleaning");
+  assert.equal(stored.notes, "weekly");
+  assert.equal(stored.amount, 125050);
+  assert.ok(Date.parse(stored.createdAt));
+  assert.equal((await repo.monthlyFinances(db, "2026-11")).net, -125050);
+  await repo.saveExpense(
+    db,
+    { ...e, amount: 80025, date: "2026-12-01", category: "" },
+    true,
+  );
+  const edited = await repo.getExpense(db, e.id);
+  assert.equal(edited.createdAt, stored.createdAt);
+  assert.ok(edited.updatedAt >= stored.updatedAt);
+  assert.equal((await repo.monthlyFinances(db, "2026-11")).expenses, 0);
+  const december = await repo.monthlyFinances(db, "2026-12");
+  assert.equal(december.expenses, 80025);
+  assert.deepEqual(december.breakdown, [{ category: "Other", amount: 80025 }]);
+  await repo.deleteExpense(db, e.id);
+  assert.equal(await repo.getExpense(db, e.id), undefined);
+  assert.equal((await repo.monthlyFinances(db, "2026-12")).net, 0);
+  await assert.rejects(repo.saveExpense(db, e, true), /no longer exists/);
+});
+
+test("expense validation and database constraints reject invalid amounts, descriptions, dates and duplicate IDs", async (t) => {
+  const db = await setup(t),
+    e = expense();
+  for (const change of [
+    { description: " " },
+    { description: "x".repeat(161) },
+    { amount: 0 },
+    { amount: -1 },
+    { amount: 0.5 },
+    { amount: NaN },
+    { amount: Infinity },
+    { amount: "100" },
+    { amount: 100000000001 },
+    { date: "2026-02-30" },
+    { date: "2025-02-29" },
+    { category: "x".repeat(81) },
+    { notes: [] },
+    { notes: "x".repeat(2001) },
+    { id: "bad id" },
+  ])
+    await assert.rejects(repo.saveExpense(db, { ...e, ...change }));
+  const results = await Promise.allSettled([
+    repo.saveExpense(db, e),
+    repo.saveExpense(db, e),
+  ]);
+  assert.equal(results.filter((r) => r.status === "fulfilled").length, 1);
+  assert.equal((await repo.monthlyFinances(db, "2026-11")).entries.length, 1);
+  for (const amount of [0, -10, 1.5, 100000000001])
+    await assert.rejects(
+      db.runAsync(
+        "INSERT INTO expenses VALUES(?,?,?,?,?,?,?,?)",
+        randomUUID(),
+        "Invalid",
+        "",
+        amount,
+        "2026-11-03",
+        "",
+        "2026-11-03T00:00:00.000Z",
+        "2026-11-03T00:00:00.000Z",
+      ),
+    );
+});
+
+test("cash income follows actual dates of late and partial payments without changing billing totals", async (t) => {
+  const db = await setup(t),
+    person = tenant({ startMonth: "2026-10" });
+  await repo.saveTenant(db, person, true);
+  const charge = (await repo.entries(db, "2026-10"))[0];
+  await repo.savePayment(
+    db,
+    payment(charge.id, 100000, { date: "2026-11-03" }),
+  );
+  await repo.savePayment(db, payment(charge.id, 50000, { date: "2026-10-31" }));
+  await repo.saveExpense(db, expense({ amount: 125000 }));
+  assert.equal((await repo.monthlyFinances(db, "2026-10")).income, 50000);
+  const november = await repo.monthlyFinances(db, "2026-11");
+  assert.equal(november.income, 100000);
+  assert.equal(november.expenses, 125000);
+  assert.equal(november.net, -25000);
+  const billed = core.totals(await repo.entries(db, "2026-10"));
+  assert.equal(billed.collected, 150000);
+  assert.equal(billed.remaining, 150000);
+  assert.equal(core.totals(await repo.entries(db, "2026-11")).collected, 0);
+  await repo.archiveTenant(db, person.id, "2026-10");
+  assert.equal((await repo.monthlyFinances(db, "2026-11")).income, 100000);
+});
+
+test("payment corrections and deletion update cash reports without counting voided receipts", async (t) => {
+  const db = await setup(t),
+    person = tenant({ startMonth: "2026-10" });
+  await repo.saveTenant(db, person, true);
+  const c = (await repo.entries(db, "2026-10"))[0];
+  const p = payment(c.id, 100000, { date: "2026-11-01" });
+  await repo.savePayment(db, p);
+  await repo.savePayment(
+    db,
+    { ...p, date: "2026-12-01", amount: 150000 },
+    true,
+  );
+  assert.equal((await repo.monthlyFinances(db, "2026-11")).income, 0);
+  assert.equal((await repo.monthlyFinances(db, "2026-12")).income, 150000);
+  assert.equal((await repo.paymentReceipts(db, p.id)).length, 2);
+  await repo.deletePayment(db, p.id);
+  assert.equal((await repo.monthlyFinances(db, "2026-12")).income, 0);
+  assert.equal((await repo.entries(db, "2026-10"))[0].paid, 0);
+});
+
+test("expense reports preserve December, January, leap day and final supported month independently", async (t) => {
+  const db = await setup(t);
+  for (const [date, amount] of [
+    ["2026-12-31", 10025],
+    ["2027-01-01", 20050],
+    ["2024-02-29", 30075],
+    ["2199-12-31", 40100],
+  ])
+    await repo.saveExpense(db, expense({ date, amount }));
+  for (const [month, amount] of [
+    ["2026-12", 10025],
+    ["2027-01", 20050],
+    ["2024-02", 30075],
+    ["2199-12", 40100],
+  ])
+    assert.equal((await repo.monthlyFinances(db, month)).expenses, amount);
+  assert.deepEqual(finances.financialTotals(0, 0), {
+    income: 0,
+    expenses: 0,
+    net: 0,
+  });
+  await assert.rejects(repo.monthlyFinances(db, "2026-13"));
+  assert.throws(() => finances.financialTotals(NaN, 0));
+  assert.throws(() => finances.financialTotals(Number.MAX_SAFE_INTEGER + 1, 0));
+  assert.equal(finances.financialTotals(5000, 15000).net, -10000);
+});
+
+test("category breakdown supports defaults and custom descriptions with exact sums", async (t) => {
+  const db = await setup(t);
+  for (const e of [
+    expense({ description: "Tubig", amount: 10001 }),
+    expense({ description: "Kuryente", amount: 20002 }),
+    expense({ description: "Cleaners", category: "Cleaning", amount: 5000 }),
+    expense({ category: "", amount: 1000 }),
+    expense({ category: "Security", amount: 2000 }),
+  ])
+    await repo.saveExpense(db, e);
+  const r = await repo.monthlyFinances(db, "2026-11");
+  assert.equal(r.expenses, 38003);
+  assert.deepEqual(r.breakdown, [
+    { category: "Utilities", amount: 30003 },
+    { category: "Cleaning", amount: 5000 },
+    { category: "Security", amount: 2000 },
+    { category: "Other", amount: 1000 },
+  ]);
+  assert.deepEqual(finances.expenseCategories, [
+    "Utilities",
+    "Cleaning",
+    "Repairs",
+    "Supplies",
+    "Other",
+  ]);
+});
+
+test("version-3 migration preserves financial, receipt, business and printer records and rolls back on failure", async (t) => {
+  const db = database();
+  t.after(() => db.native.close());
+  await db.execAsync("PRAGMA foreign_keys=ON;");
+  await db.execAsync(source("src/database/schema").schemaV3);
+  const person = tenant();
+  await repo.saveTenant(db, person, true);
+  const c = (await repo.entries(db, person.startMonth))[0];
+  await repo.savePayment(db, payment(c.id, 100000));
+  await repo.setSetting(db, "business", { name: "Original boarding house" });
+  await repo.setSetting(db, "printer", {
+    selected: { id: "original" },
+    autoPrint: true,
+  });
+  const before = await legacySnapshot(db);
+  const receipts = await db.getAllAsync("SELECT * FROM receipts");
+  const original = db.execAsync;
+  db.execAsync = async (sql) => {
+    if (sql.includes("CREATE TABLE expenses")) {
+      await original(sql);
+      throw new Error("Simulated expense migration failure");
+    }
+    return original(sql);
+  };
+  await assert.rejects(repo.migrate(db));
+  db.execAsync = original;
+  assert.equal((await db.getFirstAsync("PRAGMA user_version")).user_version, 3);
+  assert.equal(
+    (
+      await db.getFirstAsync(
+        "SELECT COUNT(*) n FROM sqlite_master WHERE name='expenses'",
+      )
+    ).n,
+    0,
+  );
+  assert.deepEqual(await legacySnapshot(db), before);
+  await repo.migrate(db);
+  await repo.migrate(db);
+  assert.equal((await db.getFirstAsync("PRAGMA user_version")).user_version, 4);
+  assert.deepEqual(await legacySnapshot(db), before);
+  assert.deepEqual(await db.getAllAsync("SELECT * FROM receipts"), receipts);
+  assert.equal(
+    (await repo.monthlyFinances(db, core.currentMonth())).income,
+    100000,
+  );
+  assert.equal(
+    (await repo.monthlyFinances(db, core.currentMonth())).expenses,
+    0,
+  );
+});
+
+test("expense backup round trip, version-3 compatibility and invalid restore protection", async (t) => {
+  const db = await setup(t),
+    restored = await setup(t);
+  const person = tenant({ startMonth: "2026-10" });
+  await repo.saveTenant(db, person, true);
+  const charge = (await repo.entries(db, "2026-10"))[0];
+  await repo.savePayment(
+    db,
+    payment(charge.id, 100000, { date: "2026-11-03" }),
+  );
+  await repo.saveExpense(db, expense());
+  const backup = await repo.exportData(db);
+  assert.equal(backup.schemaVersion, 4);
+  await repo.restoreData(restored, JSON.parse(JSON.stringify(backup)));
+  assert.deepEqual((await repo.exportData(restored)).expenses, backup.expenses);
+  assert.deepEqual((await repo.exportData(restored)).receipts, backup.receipts);
+  assert.equal(
+    (await repo.monthlyFinances(restored, "2026-11")).income,
+    100000,
+  );
+  for (const change of [
+    null,
+    { ...backup.expenses[0], amount: 0 },
+    { ...backup.expenses[0], amount: 1.5 },
+    { ...backup.expenses[0], date: "2026-02-30" },
+    { ...backup.expenses[0], createdAt: "bad" },
+    { ...backup.expenses[0], createdAt: "2026-02-30T00:00:00.000Z" },
+    { ...backup.expenses[0], updatedAt: "2000-01-01T00:00:00.000Z" },
+  ]) {
+    await assert.rejects(
+      repo.restoreData(restored, { ...backup, expenses: [change] }),
+    );
+    assert.deepEqual(
+      (await repo.exportData(restored)).expenses,
+      backup.expenses,
+    );
+  }
+  await assert.rejects(
+    repo.restoreData(restored, {
+      ...backup,
+      expenses: [backup.expenses[0], backup.expenses[0]],
+    }),
+  );
+  await assert.rejects(
+    repo.restoreData(restored, { ...backup, expenses: undefined }),
+  );
+  const old = { ...backup, schemaVersion: 3 };
+  delete old.expenses;
+  assert.deepEqual(core.validateBackup(old).expenses, []);
+  await repo.restoreData(restored, old);
+  assert.equal((await repo.monthlyFinances(restored, "2026-11")).expenses, 0);
+  assert.equal(
+    (await repo.monthlyFinances(restored, "2026-11")).income,
+    100000,
+  );
+});
+
+test("restore failure inserting expenses rolls back existing expenses, payments and receipts", async (t) => {
+  const sourceDb = await setup(t),
+    target = await setup(t);
+  await repo.saveExpense(sourceDb, expense());
+  await repo.saveExpense(
+    target,
+    expense({ description: "Keep this", amount: 5000 }),
+  );
+  const person = tenant();
+  await repo.saveTenant(target, person, true);
+  const c = (await repo.entries(target, person.startMonth))[0];
+  await repo.savePayment(target, payment(c.id, 100000));
+  const before = await repo.exportData(target),
+    backup = await repo.exportData(sourceDb),
+    original = target.runAsync;
+  target.runAsync = async (sql, ...args) => {
+    if (sql.startsWith("INSERT INTO expenses"))
+      throw new Error("Simulated restore failure");
+    return original(sql, ...args);
+  };
+  await assert.rejects(repo.restoreData(target, backup));
+  target.runAsync = original;
+  const after = await repo.exportData(target);
+  for (const key of ["expenses", "payments", "receipts", "tenants"])
+    assert.deepEqual(after[key], before[key]);
+});
+
+test("expenses and historical cash reports survive closing and reopening SQLite", async () => {
+  const { join } = require("node:path"),
+    { tmpdir } = require("node:os"),
+    { unlinkSync, existsSync } = require("node:fs");
+  const file = join(tmpdir(), `rentledger-expenses-${randomUUID()}.db`);
+  let db = database(file);
+  try {
+    await repo.migrate(db);
+    await repo.saveExpense(db, expense());
+    db.native.close();
+    db = database(file);
+    await repo.migrate(db);
+    const r = await repo.monthlyFinances(db, "2026-11");
+    assert.equal(r.entries.length, 1);
+    assert.equal(r.expenses, 125050);
+    assert.equal(r.net, -125050);
+  } finally {
+    db.native.close();
+    for (const suffix of ["", "-wal", "-shm"])
+      if (existsSync(file + suffix)) unlinkSync(file + suffix);
+  }
 });

@@ -1,4 +1,4 @@
-import Monthly from "../../screens/Monthly";
+import { Redirect } from "expo-router";
 export default function Records() {
-  return <Monthly records />;
+  return <Redirect href="/payment-history" />;
 }

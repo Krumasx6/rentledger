@@ -63,4 +63,19 @@ CREATE UNIQUE INDEX receipt_sending ON print_attempts(receiptId) WHERE status='s
 CREATE INDEX print_receipt ON print_attempts(receiptId);
 PRAGMA user_version=3;
 `;
-export const schema = schemaV2 + migrateV2ToV3;
+export const schemaV3 = schemaV2 + migrateV2ToV3;
+export const migrateV3ToV4 = `
+CREATE TABLE expenses (
+ id TEXT PRIMARY KEY NOT NULL,
+ description TEXT NOT NULL CHECK(length(trim(description)) BETWEEN 1 AND 160),
+ category TEXT NOT NULL DEFAULT '' CHECK(length(category)<=80),
+ amount INTEGER NOT NULL CHECK(typeof(amount)='integer' AND amount>0 AND amount<=100000000000),
+ date TEXT NOT NULL CHECK(length(date)=10),
+ notes TEXT NOT NULL DEFAULT '' CHECK(length(notes)<=2000),
+ createdAt TEXT NOT NULL, updatedAt TEXT NOT NULL
+);
+CREATE INDEX expense_date ON expenses(date);
+CREATE INDEX payment_date ON payments(date);
+PRAGMA user_version=4;
+`;
+export const schema = schemaV3 + migrateV3ToV4;

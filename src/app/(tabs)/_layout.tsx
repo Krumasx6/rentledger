@@ -33,7 +33,7 @@ export default function TabLayout() {
       <Tabs.Screen
         name="index"
         options={{
-          title: "Dashboard",
+          title: "Home",
           tabBarIcon: ({ color, size }) => (
             <Feather
               name="grid"
@@ -57,12 +57,12 @@ export default function TabLayout() {
         }}
       />
       <Tabs.Screen
-        name="records"
+        name="finances"
         options={{
-          title: "Records",
+          title: "Finances",
           tabBarIcon: ({ color, size }) => (
             <Feather
-              name="file-text"
+              name="pie-chart"
               color={typeof color === "string" ? color : colors.muted}
               size={size}
             />
@@ -82,6 +82,7 @@ export default function TabLayout() {
           ),
         }}
       />
+      <Tabs.Screen name="records" options={{ href: null }} />
     </Tabs>
   );
 }

@@ -42,8 +42,47 @@ export type Payment = {
   recordedAt?: string;
 };
 export type Setting = { key: string; value: string };
+export type Expense = {
+  id: string;
+  description: string;
+  category: string;
+  amount: number;
+  date: string;
+  notes: string;
+  createdAt: string;
+  updatedAt: string;
+};
+export type ExpenseInput = Omit<Expense, "createdAt" | "updatedAt">;
+export function validateExpense(value: ExpenseInput): ExpenseInput {
+  if (
+    !value ||
+    typeof value.id !== "string" ||
+    !/^[\w-]{1,100}$/.test(value.id) ||
+    typeof value.description !== "string" ||
+    !value.description.trim() ||
+    value.description.length > 160 ||
+    typeof value.category !== "string" ||
+    value.category.length > 80 ||
+    !Number.isSafeInteger(value.amount) ||
+    value.amount <= 0 ||
+    value.amount > 100000000000 ||
+    typeof value.date !== "string" ||
+    !dateValid(value.date) ||
+    typeof value.notes !== "string" ||
+    value.notes.length > 2000
+  )
+    throw new Error(
+      "Enter a description, a positive amount, and a valid expense date.",
+    );
+  return {
+    ...value,
+    description: value.description.trim(),
+    category: value.category.trim(),
+    notes: value.notes.trim(),
+  };
+}
 export type Backup = {
-  schemaVersion: 3;
+  schemaVersion: 4;
   exportedAt: string;
   tenants: Tenant[];
   rates: Rate[];
@@ -52,6 +91,7 @@ export type Backup = {
   settings: Setting[];
   receipts: Receipt[];
   printAttempts: PrintAttempt[];
+  expenses: Expense[];
 };
 export type Entry = Charge & { name: string; room: string; paid: number };
 export const monthValid = (s: string) =>
@@ -154,7 +194,10 @@ export function validateBackup(input: unknown): Backup {
   if (!input || typeof input !== "object") return fail();
   const b = input as Omit<Backup, "schemaVersion"> & { schemaVersion: unknown };
   if (
-    (b.schemaVersion !== 1 && b.schemaVersion !== 2 && b.schemaVersion !== 3) ||
+    (b.schemaVersion !== 1 &&
+      b.schemaVersion !== 2 &&
+      b.schemaVersion !== 3 &&
+      b.schemaVersion !== 4) ||
     typeof b.exportedAt !== "string" ||
     !Number.isFinite(Date.parse(b.exportedAt))
   )
@@ -265,8 +308,9 @@ export function validateBackup(input: unknown): Backup {
       return fail();
     keys.add(s.key);
   }
-  const receipts: Receipt[] = b.schemaVersion === 3 ? b.receipts : [];
-  const attempts: PrintAttempt[] = b.schemaVersion === 3 ? b.printAttempts : [];
+  const receipts: Receipt[] = Number(b.schemaVersion) >= 3 ? b.receipts : [];
+  const attempts: PrintAttempt[] =
+    Number(b.schemaVersion) >= 3 ? b.printAttempts : [];
   if (
     !Array.isArray(receipts) ||
     !Array.isArray(attempts) ||
@@ -335,7 +379,7 @@ export function validateBackup(input: unknown): Backup {
     receiptMap.set(r.id, r);
     refs.add(r.ref);
   }
-  if (b.schemaVersion === 3 && b.payments.some((p) => !active.has(p.id)))
+  if (Number(b.schemaVersion) >= 3 && b.payments.some((p) => !active.has(p.id)))
     return fail();
   const attemptIds = new Set();
   const sending = new Set();
@@ -363,5 +407,34 @@ export function validateBackup(input: unknown): Backup {
     }
     attemptIds.add(a.id);
   }
-  return { ...b, schemaVersion: 3, receipts, printAttempts: attempts };
+  const expenses: Expense[] = b.schemaVersion === 4 ? b.expenses : [];
+  if (!Array.isArray(expenses) || expenses.length > 100000) return fail();
+  const expenseIds = new Set<string>();
+  const expenseStamp = (v: unknown): v is string =>
+    typeof v === "string" &&
+    v.length === 24 &&
+    Number.isFinite(Date.parse(v)) &&
+    new Date(v).toISOString() === v;
+  for (const e of expenses) {
+    try {
+      validateExpense(e);
+    } catch {
+      return fail();
+    }
+    if (
+      expenseIds.has(e.id) ||
+      !expenseStamp(e.createdAt) ||
+      !expenseStamp(e.updatedAt) ||
+      Date.parse(e.updatedAt) < Date.parse(e.createdAt)
+    )
+      return fail();
+    expenseIds.add(e.id);
+  }
+  return {
+    ...b,
+    schemaVersion: 4,
+    receipts,
+    printAttempts: attempts,
+    expenses,
+  };
 }

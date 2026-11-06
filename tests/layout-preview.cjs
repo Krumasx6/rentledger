@@ -10,6 +10,26 @@ const h = React.createElement;
 const root = path.resolve(__dirname, "..");
 let width = 360;
 let bottom = 24;
+let previewKind = "settings";
+// Preview data exists only in this isolated renderer, never in app storage.
+const report = {
+  income: 100000,
+  expenses: 125050,
+  net: -25050,
+  breakdown: [{ category: "Utilities", amount: 125050 }],
+  entries: [
+    {
+      id: "preview-only",
+      description: "Kuryente and water for the boarding house",
+      category: "Utilities",
+      amount: 125050,
+      date: "2026-11-03",
+      notes: "A longer expense note wraps within the card on small screens.",
+      createdAt: "",
+      updatedAt: "",
+    },
+  ],
+};
 const icons = require("@expo/vector-icons/build/vendor/react-native-vector-icons/glyphmaps/Feather.json");
 const cache = new Map();
 function load(file) {
@@ -39,6 +59,7 @@ function load(file) {
       };
     if (name === "react-native-safe-area-context")
       return {
+        useSafeAreaInsets: () => ({ top: 24, bottom, left: 0, right: 0 }),
         SafeAreaView: ({ edges = [], style, children, ...props }) =>
           h(
             RN.View,
@@ -59,7 +80,44 @@ function load(file) {
       };
     if (name === "expo-router")
       return {
-        router: { canGoBack: () => true, back: () => {}, replace: () => {} },
+        router: {
+          canGoBack: () => true,
+          back: () => {},
+          replace: () => {},
+          push: () => {},
+        },
+        useLocalSearchParams: () => ({ month: "2026-11" }),
+      };
+    if (name === "expo-crypto") return { randomUUID: () => "preview-only" };
+    if (name.endsWith("/database/context"))
+      return { useSQLiteContext: () => ({}) };
+    if (name.endsWith("/hooks/useLedger"))
+      return {
+        useMonth: () => ({ month: "2026-11", setMonth: () => {} }),
+        useLoad: () => ({
+          data:
+            previewKind === "expense"
+              ? true
+              : previewKind === "home"
+                ? {
+                    entries: [
+                      {
+                        id: "preview-charge",
+                        tenantId: "preview-tenant",
+                        month: "2026-11",
+                        name: "A Long Tenant Name Dela Cruz",
+                        room: "Room 01",
+                        dueDay: 31,
+                        amount: 300000,
+                        paid: 100000,
+                      },
+                    ],
+                    finances: report,
+                  }
+                : report,
+          error: "",
+          refresh: () => {},
+        }),
       };
     if (name === "@expo/vector-icons/Feather")
       return ({ name, size, color }) =>
@@ -91,6 +149,11 @@ const business = {
   footer: "Thank you for your payment!",
 };
 function view(kind) {
+  previewKind = kind;
+  if (kind === "finances")
+    return h(load("src/screens/FinancesScreen.tsx").default);
+  if (kind === "expense") return h(load("src/app/expense.tsx").default);
+  if (kind === "home") return h(load("src/screens/Monthly.tsx").default);
   if (kind === "business")
     return h(
       ui.Page,
@@ -109,6 +172,7 @@ function view(kind) {
         ui.Card,
         null,
         ...[
+          ["Payment History", "calendar"],
           ["Bluetooth Printer", "printer"],
           ["Business Information", "briefcase"],
           ["Receipts", "file-text"],
@@ -119,7 +183,7 @@ function view(kind) {
             key: label,
             label,
             icon,
-            last: i === 4,
+            last: i === 5,
             onPress: () => {},
           }),
         ),
@@ -160,16 +224,22 @@ function view(kind) {
   );
 }
 let body = "";
-for (const kind of ["settings", "business", "payment"]) {
+for (const kind of [
+  "home",
+  "finances",
+  "expense",
+  "settings",
+  "business",
+  "payment",
+]) {
   body += `<h2>${kind}</h2><div class="row">`;
   for (const w of [360, 390, 430]) {
     width = w;
     bottom = 24;
     const content = renderToStaticMarkup(view(kind));
-    const tab =
-      kind === "settings"
-        ? `<nav style="height:${layout.tabMetrics(bottom).height}px;padding-bottom:${bottom}px">${["Dashboard", "Tenants", "Records", "Settings"].map((x) => `<button>${x}</button>`).join("")}</nav>`
-        : "";
+    const tab = ["home", "finances", "settings"].includes(kind)
+      ? `<nav style="height:${layout.tabMetrics(bottom).height}px;padding-bottom:${bottom}px">${["Home", "Tenants", "Finances", "Settings"].map((x) => `<button>${x}</button>`).join("")}</nav>`
+      : "";
     body += `<section><h3>${w}px</h3><div class="phone" data-width="${w}" data-kind="${kind}" style="width:${w}px;height:760px">${content}${tab}<div class="system top">Status bar</div><div class="system bottom">Android system navigation</div></div></section>`;
   }
   body += "</div>";

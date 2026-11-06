@@ -18,6 +18,7 @@ export function screenMetrics(width: number) {
   };
 }
 export const settingsRoutes = {
+  history: "/payment-history",
   printer: "/bluetooth-printer",
   business: "/business-information",
   receipts: "/receipt",

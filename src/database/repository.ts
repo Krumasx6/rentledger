@@ -1,6 +1,7 @@
 import type { SQLiteDatabase } from "expo-sqlite";
 import { randomUUID } from "expo-crypto";
-import { schema, migrateV1ToV2, migrateV2ToV3 } from "./schema";
+import { schema, migrateV1ToV2, migrateV2ToV3, migrateV3ToV4 } from "./schema";
+import { financialTotals, expenseBreakdown } from "../core/finances";
 import {
   BusinessInfo,
   defaultBusiness,
@@ -13,6 +14,9 @@ import {
 import { PrintResult } from "../core/printing";
 import {
   Backup,
+  Expense,
+  ExpenseInput,
+  validateExpense,
   Charge,
   Entry,
   Payment,
@@ -55,17 +59,20 @@ export async function migrate(db: SQLiteDatabase) {
   const v = await db.getFirstAsync<{ user_version: number }>(
     "PRAGMA user_version",
   );
-  if ((v?.user_version || 0) > 3)
+  if ((v?.user_version || 0) > 4)
     throw new Error("This database needs a newer version of RentLedger.");
   if (!v?.user_version)
     await atomic(db, async (tx) => {
       await tx.execAsync(schema);
     });
-  else if (v.user_version < 3)
+  else if (v.user_version < 4)
     await atomic(db, async (tx) => {
       if (v.user_version === 1) await tx.execAsync(migrateV1ToV2);
-      await tx.execAsync(migrateV2ToV3);
-      await backfillReceipts(tx);
+      if (v.user_version < 3) {
+        await tx.execAsync(migrateV2ToV3);
+        await backfillReceipts(tx);
+      }
+      await tx.execAsync(migrateV3ToV4);
       if ((await tx.getAllAsync("PRAGMA foreign_key_check")).length)
         throw new Error("Database upgrade failed relationship validation.");
     });
@@ -80,6 +87,89 @@ export const allTenants = (db: SQLiteDatabase) =>
   db.getAllAsync<Tenant>(
     "SELECT * FROM tenants ORDER BY endMonth IS NOT NULL,name COLLATE NOCASE",
   );
+export const getExpense = (db: SQLiteDatabase, id: string) =>
+  db.getFirstAsync<Expense>("SELECT * FROM expenses WHERE id=?", id);
+export async function saveExpense(
+  db: SQLiteDatabase,
+  input: ExpenseInput,
+  editing = false,
+) {
+  const e = validateExpense(input);
+  await atomic(db, async (tx) => {
+    if (editing) {
+      const old = await getExpense(tx, e.id);
+      if (!old) throw new Error("Expense no longer exists.");
+      const updatedAt = new Date(
+        Math.max(Date.now(), Date.parse(old.updatedAt)),
+      ).toISOString();
+      await tx.runAsync(
+        "UPDATE expenses SET description=?,category=?,amount=?,date=?,notes=?,updatedAt=? WHERE id=?",
+        e.description,
+        e.category,
+        e.amount,
+        e.date,
+        e.notes,
+        updatedAt,
+        e.id,
+      );
+    } else {
+      const now = new Date().toISOString();
+      await tx.runAsync(
+        "INSERT INTO expenses(id,description,category,amount,date,notes,createdAt,updatedAt) VALUES(?,?,?,?,?,?,?,?)",
+        e.id,
+        e.description,
+        e.category,
+        e.amount,
+        e.date,
+        e.notes,
+        now,
+        now,
+      );
+    }
+  });
+}
+export async function deleteExpense(db: SQLiteDatabase, id: string) {
+  await atomic(db, async (tx) => {
+    const result = await tx.runAsync("DELETE FROM expenses WHERE id=?", id);
+    if (!result.changes) throw new Error("Expense no longer exists.");
+  });
+}
+export type MonthlyFinances = ReturnType<typeof financialTotals> & {
+  entries: Expense[];
+  breakdown: ReturnType<typeof expenseBreakdown>;
+};
+export async function monthlyFinances(
+  db: SQLiteDatabase,
+  month: string,
+): Promise<MonthlyFinances> {
+  if (!monthValid(month)) throw new Error("Choose a valid month.");
+  const start = `${month}-01`,
+    end = `${shiftMonth(month, 1)}-01`;
+  let report!: MonthlyFinances;
+  await atomic(db, async (tx) => {
+    const income = await tx.getFirstAsync<{ amount: number }>(
+      "SELECT COALESCE(SUM(amount),0) amount FROM payments WHERE date>=? AND date<?",
+      start,
+      end,
+    );
+    const expenses = await tx.getFirstAsync<{ amount: number }>(
+      "SELECT COALESCE(SUM(amount),0) amount FROM expenses WHERE date>=? AND date<?",
+      start,
+      end,
+    );
+    const rows = await tx.getAllAsync<Expense>(
+      "SELECT * FROM expenses WHERE date>=? AND date<? ORDER BY date DESC,createdAt DESC,id",
+      start,
+      end,
+    );
+    report = {
+      ...financialTotals(income?.amount || 0, expenses?.amount || 0),
+      entries: rows,
+      breakdown: expenseBreakdown(rows),
+    };
+  });
+  return report;
+}
 export async function ensureMonth(db: SQLiteDatabase, month: string) {
   if (!monthValid(month)) throw new Error("Invalid billing month.");
   await atomic(db, async (tx) => {
@@ -208,6 +298,15 @@ export async function archiveTenant(
     await tx.runAsync("UPDATE tenants SET endMonth=? WHERE id=?", end, id);
   });
 }
+export async function restoreTenant(db: SQLiteDatabase, id: string) {
+  await atomic(db, async (tx) => {
+    const result = await tx.runAsync(
+      "UPDATE tenants SET endMonth=NULL WHERE id=? AND endMonth IS NOT NULL",
+      id,
+    );
+    if (!result.changes) throw new Error("Archived tenant no longer exists.");
+  });
+}
 export async function savePayment(
   db: SQLiteDatabase,
   p: Payment,
@@ -289,7 +388,7 @@ export async function exportData(db: SQLiteDatabase): Promise<Backup> {
   let result!: Backup;
   await atomic(db, async (tx) => {
     result = {
-      schemaVersion: 3,
+      schemaVersion: 4,
       exportedAt: new Date().toISOString(),
       tenants: await allTenants(tx),
       rates: await tx.getAllAsync("SELECT * FROM rates"),
@@ -298,6 +397,7 @@ export async function exportData(db: SQLiteDatabase): Promise<Backup> {
       settings: await tx.getAllAsync("SELECT * FROM settings"),
       receipts: await tx.getAllAsync("SELECT * FROM receipts"),
       printAttempts: await tx.getAllAsync("SELECT * FROM print_attempts"),
+      expenses: await tx.getAllAsync("SELECT * FROM expenses ORDER BY date,id"),
     };
   });
   return validateBackup(result);
@@ -306,7 +406,7 @@ export async function restoreData(db: SQLiteDatabase, input: unknown) {
   const b = validateBackup(input);
   await atomic(db, async (tx) => {
     await tx.execAsync(
-      "DELETE FROM print_attempts; DELETE FROM receipts; DELETE FROM payments; DELETE FROM charges; DELETE FROM rates; DELETE FROM tenants; DELETE FROM settings;",
+      "DELETE FROM expenses; DELETE FROM print_attempts; DELETE FROM receipts; DELETE FROM payments; DELETE FROM charges; DELETE FROM rates; DELETE FROM tenants; DELETE FROM settings;",
     );
     for (const t of b.tenants)
       await tx.runAsync(
@@ -375,6 +475,18 @@ export async function restoreData(db: SQLiteDatabase, input: unknown) {
         a.message,
         a.createdAt,
         a.status === "sending" ? new Date().toISOString() : a.finishedAt,
+      );
+    for (const e of b.expenses)
+      await tx.runAsync(
+        "INSERT INTO expenses(id,description,category,amount,date,notes,createdAt,updatedAt) VALUES(?,?,?,?,?,?,?,?)",
+        e.id,
+        e.description,
+        e.category,
+        e.amount,
+        e.date,
+        e.notes,
+        e.createdAt,
+        e.updatedAt,
       );
     await backfillReceipts(tx);
     // Device identifiers and permissions do not transfer between phones.

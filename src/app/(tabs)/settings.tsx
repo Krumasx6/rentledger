@@ -7,6 +7,11 @@ export default function Settings() {
     <Page title="Settings" tabbed>
       <Card>
         <MenuRow
+          label="Payment History"
+          icon="calendar"
+          onPress={() => router.push(settingsRoutes.history)}
+        />
+        <MenuRow
           label="Bluetooth Printer"
           icon="printer"
           onPress={() => router.push(settingsRoutes.printer)}

@@ -24,15 +24,17 @@ import {
   totals,
 } from "../core/ledger";
 import { screenMetrics } from "../core/layout";
-import { entries } from "../database/repository";
+import { entries, monthlyFinances } from "../database/repository";
 import { useLoad, useMonth } from "../hooks/useLedger";
 type PaymentFilter = "paid" | "outstanding";
 export default function Monthly({
   records = false,
   paymentFilter,
+  standalone = false,
 }: {
   records?: boolean;
   paymentFilter?: PaymentFilter;
+  standalone?: boolean;
 }) {
   const db = useSQLiteContext();
   const { width } = useWindowDimensions();
@@ -40,9 +42,21 @@ export default function Monthly({
   const metrics = screenMetrics(width - insets.left - insets.right);
   const { month, setMonth } = useMonth();
   const [search, setSearch] = useState("");
-  const { data, error, refresh } = useLoad(
-    useCallback(() => entries(db, month), [db, month]),
+  const {
+    data: monthlyData,
+    error,
+    refresh,
+  } = useLoad(
+    useCallback(
+      async () => ({
+        entries: await entries(db, month),
+        finances:
+          !records && !paymentFilter ? await monthlyFinances(db, month) : null,
+      }),
+      [db, month, records, paymentFilter],
+    ),
   );
+  const data = monthlyData?.entries;
   const total = totals(data || []);
   const matchingStatus = data?.filter((e) =>
     paymentFilter === "paid"
@@ -56,15 +70,15 @@ export default function Monthly({
   );
   return (
     <Page
-      tabbed={!paymentFilter}
-      back={!!paymentFilter}
+      tabbed={!paymentFilter && !standalone}
+      back={!!paymentFilter || standalone}
       title={
         paymentFilter === "paid"
           ? "Fully Paid"
           : paymentFilter === "outstanding"
             ? "Unpaid / Partial"
             : records
-              ? "Records"
+              ? "Payment History"
               : "RentLedger"
       }
     >
@@ -100,7 +114,7 @@ export default function Monthly({
                 <Text
                   style={{ color: "#BCD4C7", fontSize: 13, fontWeight: "600" }}
                 >
-                  Collected
+                  Collected · Billing month
                 </Text>
                 <Text
                   adjustsFontSizeToFit
@@ -192,6 +206,38 @@ export default function Monthly({
                   );
                 })}
               </View>
+              {monthlyData?.finances && (
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel={`Cash ${monthlyData.finances.net < 0 ? "net loss" : "net profit"}, ${money(monthlyData.finances.net)}`}
+                  onPress={() => router.push("/(tabs)/finances")}
+                  style={[s.card, s.between, { padding: 14 }]}
+                >
+                  <View style={{ flex: 1, gap: 3 }}>
+                    <Text style={s.label}>
+                      {monthlyData.finances.net < 0 ? "Net Loss" : "Net Profit"}
+                    </Text>
+                    <Text style={s.label}>Cash basis · Payment date</Text>
+                  </View>
+                  <Text
+                    numberOfLines={1}
+                    adjustsFontSizeToFit
+                    style={[
+                      s.amount,
+                      {
+                        fontSize: 21,
+                        flexShrink: 1,
+                        color:
+                          monthlyData.finances.net < 0
+                            ? colors.red
+                            : colors.green,
+                      },
+                    ]}
+                  >
+                    {money(monthlyData.finances.net)}
+                  </Text>
+                </Pressable>
+              )}
               <View style={s.row}>
                 <View style={{ flex: 1 }}>
                   <Button
